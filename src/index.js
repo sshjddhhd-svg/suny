@@ -430,6 +430,12 @@ async function main() {
         return;
       }
 
+      // تجاهل إذا كانت الكتابة من لوحة التحكم (hot-swap يُطلَق من الـ API مباشرةً)
+      if (global._dashCookieWrite) {
+        log.info("تجاهل تغيير account.txt (كتابة من الداشبورد — hot-swap جارٍ)");
+        return;
+      }
+
       // تجاهل إذا كان تسجيل دخول جارٍ
       if (_loginLock) {
         log.info("تجاهل تغيير account.txt (تسجيل دخول جارٍ)");
