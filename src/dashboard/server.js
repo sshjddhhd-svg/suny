@@ -184,6 +184,24 @@ async function startDashboard(port) {
   });
 
   // ── Admins ─────────────────────────────────────────────────────────────────
+  // يُحدِّث الملف + الذاكرة المباشرة + يُعيد بناء global.isAdmin فوراً
+  function _flushAdmins(newIDs) {
+    // 1. حدِّث global.config في الذاكرة
+    if (global.config) global.config.adminIDs = newIDs.map(String);
+    // 2. أعد بناء global.isAdmin لتضمن القراءة الفورية للقائمة الجديدة
+    global.isAdmin = function(id) {
+      const ownerId = global.ownerID || global.config?.ownerID || "";
+      if (String(id) === String(ownerId)) return true;
+      return (global.config?.adminIDs || []).map(String).includes(String(id));
+    };
+    // 3. بث تحديث لكل العملاء المتصلين عبر Socket
+    if (io) io.emit("admins-updated", {
+      adminIDs: newIDs.map(String),
+      ownerID:  global.ownerID || global.config?.ownerID || "",
+    });
+    console.log(`[ADMINS] قائمة الأدمنز محدَّثة في الذاكرة: ${newIDs.length} أدمن`);
+  }
+
   app.get("/api/admins", (_req, res) => {
     const cfg = fs.existsSync(CONFIG_PATH) ? fs.readJsonSync(CONFIG_PATH) : {};
     res.json({ ownerID: cfg.ownerID || "", adminIDs: cfg.adminIDs || [] });
@@ -194,20 +212,21 @@ async function startDashboard(port) {
     try {
       const cfg = fs.existsSync(CONFIG_PATH) ? fs.readJsonSync(CONFIG_PATH) : {};
       const ids = cfg.adminIDs || [];
-      if (!ids.includes(String(uid))) ids.push(String(uid));
-      cfg.adminIDs = ids;
+      if (!ids.map(String).includes(String(uid))) ids.push(String(uid));
+      cfg.adminIDs = ids.map(String);
       fs.writeJsonSync(CONFIG_PATH, cfg, { spaces: 2 });
-      if (global.config) global.config.adminIDs = ids;
+      _flushAdmins(ids);
       res.json({ success: true, adminIDs: ids });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   app.delete("/api/admins/:uid", (req, res) => {
     try {
       const cfg = fs.existsSync(CONFIG_PATH) ? fs.readJsonSync(CONFIG_PATH) : {};
-      cfg.adminIDs = (cfg.adminIDs || []).filter(id => id !== req.params.uid);
+      const newIDs = (cfg.adminIDs || []).filter(id => id !== String(req.params.uid));
+      cfg.adminIDs = newIDs.map(String);
       fs.writeJsonSync(CONFIG_PATH, cfg, { spaces: 2 });
-      if (global.config) global.config.adminIDs = cfg.adminIDs;
-      res.json({ success: true, adminIDs: cfg.adminIDs });
+      _flushAdmins(newIDs);
+      res.json({ success: true, adminIDs: newIDs });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -340,6 +359,22 @@ async function startDashboard(port) {
       try { parsed = parseCookieInput(raw); }
       catch (e) { return res.status(400).json({ error: e.message }); }
 
+      // ── مساعد: حفظ + hot-swap مع منع مراقب الملفات من تكرار الدخول ──────────
+      function _saveCookiesAndRelogin(cookieArr, meta) {
+        // اضبط علامة _dashCookieWrite لمنع مراقب account.txt من إطلاق reLoginBot ثانيةً
+        global._dashCookieWrite = true;
+        fs.writeFileSync(ACCOUNT_PATH, JSON.stringify(cookieArr, null, 2), "utf8");
+        // أطلق hot-swap وحيداً من هنا بعد 600ms
+        setTimeout(() => {
+          global._dashCookieWrite = false;
+          if (global.reLoginBot) {
+            if (io) io.emit("bot-status", { status: "connecting", message: "جارٍ تغيير الحساب…" });
+            global.reLoginBot();
+          }
+        }, 600);
+        if (io) io.emit("cookies-updated", meta);
+      }
+
       // If token — convert directly
       if (parsed.isToken) {
         const getFbstate = require("../utils/getFbstateFromToken");
@@ -348,12 +383,9 @@ async function startDashboard(port) {
           const deduped = dedup(cookies);
           if (!deduped.length) return res.status(400).json({ error: "التوكن لم يُرجع كوكيز" });
           const cUser = deduped.find(c => c.key === "c_user");
-          // Save as JSON array
-          fs.writeFileSync(ACCOUNT_PATH, JSON.stringify(deduped, null, 2), "utf8");
-          if (io) io.emit("cookies-updated", { count: deduped.length, uid: cUser?.value || "", format: "token" });
-          // Hot-swap
-          setTimeout(() => { if (global.reLoginBot) global.reLoginBot(); }, 500);
-          return res.json({ success: true, count: deduped.length, uid: cUser?.value || "", format: "token" });
+          _saveCookiesAndRelogin(deduped, { count: deduped.length, uid: cUser?.value || "", format: "token" });
+          return res.json({ success: true, count: deduped.length, uid: cUser?.value || "", format: "token",
+            message: "✅ التوكن حُوِّل — جارٍ تغيير الحساب…" });
         } catch (e) {
           return res.status(400).json({ error: "خطأ في التوكن: " + e.message });
         }
@@ -365,15 +397,9 @@ async function startDashboard(port) {
 
       // Validate live
       const valid = await checkLiveCookie(cookiesToString(cookies), userAgent);
-
-      // Save as JSON array (most reliable format)
-      fs.writeFileSync(ACCOUNT_PATH, JSON.stringify(cookies, null, 2), "utf8");
-
       const cUser = cookies.find(c => c.key === "c_user");
-      if (io) io.emit("cookies-updated", { count: cookies.length, uid: cUser?.value || "", valid, format: "cookies" });
 
-      // Hot-swap: re-login without restart
-      setTimeout(() => { if (global.reLoginBot) global.reLoginBot(); }, 500);
+      _saveCookiesAndRelogin(cookies, { count: cookies.length, uid: cUser?.value || "", valid, format: "cookies" });
 
       res.json({
         success: true,
@@ -381,7 +407,7 @@ async function startDashboard(port) {
         uid:     cUser?.value || "",
         valid,
         format: "cookies",
-        message: valid ? "✅ الكوكيز صالحة — جارٍ تغيير الحساب..." : "⚠️ قد تكون منتهية الصلاحية — سيتم المحاولة",
+        message: valid ? "✅ الكوكيز صالحة — جارٍ تغيير الحساب…" : "⚠️ قد تكون منتهية الصلاحية — سيتم المحاولة",
       });
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
