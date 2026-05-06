@@ -15,96 +15,68 @@ const AUTO_MSG = `𝑨𝑼𝑻𝑶 𝑹𝑬𝑷𝑳𝒀
 
 𝑲𝑰𝑵𝑮 𝑴𝑼𝒁𝑨𝑵┊ 🕷️👑』⇣┊`;
 
-// خريطة الحالات النشطة: threadID → { timer, api }
-const _active = new Map();
+if (!global._autoSendActive) global._autoSendActive = new Map();
 
-// تأخير عشوائي يحاكي الكتابة البشرية (بالمللي ثانية)
-function humanDelay(min = 2500, max = 5500) {
-  return new Promise(r => setTimeout(r, Math.floor(Math.random() * (max - min + 1)) + min));
-}
-
-// تأخير عشوائي بين 20 و 35 ثانية
 function randomInterval() {
   return Math.floor(Math.random() * (35000 - 20000 + 1)) + 20000;
 }
 
-// إظهار مؤشر الكتابة ثم إرسال الرسالة
-async function sendWithTyping(api, threadID) {
-  try {
-    // فعّل مؤشر "يكتب..."
-    await new Promise((res, rej) =>
-      api.sendTypingIndicator(threadID, (err) => (err ? rej(err) : res()))
-    ).catch(() => {});
+async function runLoop(api, threadID) {
+  const state = global._autoSendActive.get(threadID);
+  if (!state) return;
 
-    // انتظر وقتاً عشوائياً يحاكي الكتابة
-    await humanDelay(2800, 6200);
+  while (true) {
+    const interval = randomInterval();
 
-    // أرسل الرسالة
-    await new Promise((res, rej) =>
-      api.sendMessage(AUTO_MSG, threadID, (err) => (err ? rej(err) : res()))
-    );
-  } catch (_) {}
-}
-
-// بدء حلقة الإرسال التلقائي
-async function startLoop(api, threadID) {
-  while (_active.has(threadID)) {
-    // انتظر الفاصل الزمني العشوائي (20-35 ثانية)
-    const wait = randomInterval();
-    await new Promise(r => {
-      const t = setTimeout(r, wait);
-      // خزّن المؤقت لإلغائه عند "توقف"
-      const state = _active.get(threadID);
-      if (state) state._resolveTimer = () => { clearTimeout(t); r(); };
+    await new Promise(resolve => {
+      const t = setTimeout(resolve, interval);
+      const st = global._autoSendActive.get(threadID);
+      if (st) st._cancelTimer = () => { clearTimeout(t); resolve(); };
     });
 
-    // تحقق من أن الحالة لا تزال نشطة قبل الإرسال
-    if (!_active.has(threadID)) break;
+    if (!global._autoSendActive.has(threadID)) break;
 
-    await sendWithTyping(api, threadID);
+    try {
+      await new Promise((res, rej) =>
+        api.sendMessage(AUTO_MSG, threadID, e => e ? rej(e) : res())
+      );
+    } catch (_) {}
+
+    if (!global._autoSendActive.has(threadID)) break;
   }
 }
 
 module.exports = {
   config: {
     name: "انسخ",
-    aliases: ["autopost", "autoreply"],
-    description: "يرسل رسالة تلقائية كل 20-35 ثانية مع محاكاة الكتابة",
-    usage: "انسخ | توقف",
+    aliases: [],
+    description: "يرسل رسالة تلقائية كل 20-35 ثانية مع محاكاة الكتابة البشرية",
+    usage: "انسخ",
     adminOnly: false,
     ownerOnly: false,
     category: "general",
   },
 
-  async run({ api, event, args, threadID }) {
-    const sub = (args[0] || "").trim();
+  async run({ api, threadID }) {
+    if (!global._autoSendActive) global._autoSendActive = new Map();
 
-    // ─── أمر الإيقاف "توقف" ────────────────────────────────────────────────
-    if (sub === "توقف") {
-      if (!_active.has(threadID)) {
-        return api.sendMessage("⚠️ لا يوجد إرسال تلقائي نشط في هذه المحادثة.", threadID);
-      }
-      const state = _active.get(threadID);
-      if (state?._resolveTimer) state._resolveTimer();
-      _active.delete(threadID);
-      return api.sendMessage("🛑 تم إيقاف الإرسال التلقائي.", threadID);
+    if (global._autoSendActive.has(threadID)) {
+      return api.sendMessage(
+        "✅ الإرسال التلقائي نشط بالفعل في هذه المحادثة.\nلإيقافه اكتب: ميكائيل توقف",
+        threadID
+      );
     }
 
-    // ─── تشغيل الإرسال ─────────────────────────────────────────────────────
-    if (_active.has(threadID)) {
-      return api.sendMessage("✅ الإرسال التلقائي نشط بالفعل في هذه المحادثة.\nلإيقافه: ميكائيل انسخ توقف", threadID);
-    }
+    global._autoSendActive.set(threadID, { _cancelTimer: null });
 
-    // سجّل الحالة
-    _active.set(threadID, { _resolveTimer: null });
+    await new Promise((res, rej) =>
+      api.sendMessage(
+        "✅ تم تفعيل الإرسال التلقائي\n⏱️ كل 20-35 ثانية\n\nلإيقافه اكتب: ميكائيل توقف",
+        threadID,
+        e => e ? rej(e) : res()
+      )
+    ).catch(() => {});
 
-    // أرسل رسالة تأكيد
-    api.sendMessage("✅ تم تفعيل الإرسال التلقائي\n⏱️ كل 20-35 ثانية\n\nلإيقافه اكتب: ميكائيل انسخ توقف", threadID);
-
-    // أرسل أول رسالة فوراً مع محاكاة الكتابة
-    await sendWithTyping(api, threadID);
-
-    // ابدأ الحلقة (لا تنتظر — تعمل في الخلفية)
-    startLoop(api, threadID);
+    runLoop(api, threadID);
   },
 };
