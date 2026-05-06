@@ -143,14 +143,9 @@ module.exports = async function handlerEvents(api, event, commands) {
     logCommand(senderID, threadID, cmdName, args).catch(() => {});
 
     // Run command
+    // ملاحظة: مؤشر الكتابة يعمل تلقائياً داخل api.sendMessage (humanTyping wrapper)
+    // لا حاجة لمحاكاة يدوية هنا — النظام يعمل على مستوى API مباشرةً
     try {
-      // Human typing simulation
-      if (config.humanTyping?.enable !== false) {
-        try { api.sendTypingIndicator(threadID); } catch (_) {}
-        const typingMs = Math.min(Math.max((typeof cmd.config.reply === "string" ? cmd.config.reply.length : 60) * 30, 400), 5000);
-        await new Promise(r => setTimeout(r, typingMs * (0.8 + Math.random() * 0.4)));
-      }
-
       await cmd.run({
         api, event, args,
         body, threadID, senderID,
@@ -158,12 +153,6 @@ module.exports = async function handlerEvents(api, event, commands) {
         senderName, threadName,
         prefix, config,
         commands,
-        simulateTyping: async (text) => {
-          if (config.humanTyping?.enable === false) return;
-          try { api.sendTypingIndicator(threadID); } catch (_) {}
-          const ms = Math.min(Math.max(String(text||"").length * 30, 400), 6000);
-          await new Promise(r => setTimeout(r, ms * (0.8 + Math.random() * 0.4)));
-        },
       });
     } catch (e) {
       console.error(`${chalk.red("✘")} ${cmdName} error: ${e.message}`);
